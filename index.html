@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheapest Regular Gas Near Me</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1a1d21; --mute:#6b7280; --accent:#0a7d4f; --line:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1b2026; --ink:#f1f3f5; --mute:#9aa3ad; --accent:#3ddc97; --line:#2a313a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.4 -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--ink); padding:16px; max-width:520px; margin:auto; }
+  h1 { font-size:22px; margin:8px 0 4px; }
+  .sub { color:var(--mute); font-size:14px; margin-bottom:16px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:12px; padding:14px; width:100%; background:var(--accent); color:#fff; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); margin-top:10px; }
+  input { font:inherit; width:100%; padding:12px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--ink); margin:8px 0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  .rank { display:inline-block; width:26px; height:26px; line-height:26px; text-align:center; border-radius:50%; background:var(--accent); color:#fff; font-weight:700; font-size:14px; margin-right:8px; }
+  .price { float:right; font-size:24px; font-weight:700; color:var(--accent); }
+  .name { font-weight:600; }
+  .meta { color:var(--mute); font-size:14px; margin-top:6px; }
+  a { color:var(--accent); font-weight:600; text-decoration:none; }
+  .err { color:#c0392b; }
+  .note { color:var(--mute); font-size:12px; margin-top:16px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <h1>⛽ Cheapest Regular Gas</h1>
+  <div class="sub">3 lowest regular prices among the closest stations to you.</div>
+
+  <div id="setup" class="hidden">
+    <div class="card">
+      <div class="name">One-time setup</div>
+      <div class="meta">Paste your Google Maps Platform API key. It is saved only on this device.</div>
+      <input id="key" placeholder="Google API key" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button id="saveKey">Save key</button>
+    </div>
+  </div>
+
+  <div id="main" class="hidden">
+    <button id="go">Find gas near me</button>
+    <button class="ghost" id="changeKey">Change API key</button>
+  </div>
+
+  <div id="status" class="meta"></div>
+  <div id="results"></div>
+  <div class="note">Prices come from Google Places and may be a few hours or days old. Check the pump before you drive far.</div>
+
+<script>
+const RADIUS_M = 16000;   // ~10 miles
+const POOL = 20;          // closest stations to look at (API max per call)
+const $ = id => document.getElementById(id);
+
+function getKey(){ try { return localStorage.getItem('gasKey') || ''; } catch(e){ return window.__k || ''; } }
+function setKey(v){ try { localStorage.setItem('gasKey', v); } catch(e){ window.__k = v; } }
+
+function show(){
+  const has = !!getKey();
+  $('setup').classList.toggle('hidden', has);
+  $('main').classList.toggle('hidden', !has);
+}
+
+function miles(a,b,c,d){
+  const R=3958.8, r=x=>x*Math.PI/180;
+  const dLat=r(c-a), dLon=r(d-b);
+  const h=Math.sin(dLat/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function getPos(){
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation) return rej(new Error('Location is not available on this device.'));
+    navigator.geolocation.getCurrentPosition(p=>res(p.coords), e=>{
+      rej(new Error(e.code===1 ? 'Location permission was denied. Allow location for this page and try again.' : 'Could not get your location.'));
+    }, {enableHighAccuracy:true, timeout:15000, maximumAge:60000});
+  });
+}
+
+function money(m){ return m ? (Number(m.units||0) + (m.nanos||0)/1e9) : null; }
+
+async function run(){
+  const out = $('results'), st = $('status');
+  out.innerHTML=''; st.className='meta'; st.textContent='Getting your location…';
+  try{
+    const {latitude:lat, longitude:lng} = await getPos();
+    st.textContent='Looking up nearby stations…';
+    const resp = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Goog-Api-Key': getKey(),
+        'X-Goog-FieldMask':'places.displayName,places.formattedAddress,places.location,places.fuelOptions,places.googleMapsUri'
+      },
+      body: JSON.stringify({
+        includedTypes:['gas_station'],
+        maxResultCount: POOL,
+        rankPreference:'DISTANCE',
+        locationRestriction:{circle:{center:{latitude:lat,longitude:lng}, radius:RADIUS_M}}
+      })
+    });
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error?.message || ('Request failed ('+resp.status+')'));
+
+    const rows = (data.places||[]).map(p=>{
+      const f = (p.fuelOptions?.fuelPrices||[]).find(x=>x.type==='REGULAR_UNLEADED');
+      const price = f ? money(f.price) : null;
+      return price==null ? null : {
+        name: p.displayName?.text || 'Gas station',
+        addr: p.formattedAddress || '',
+        price, updated: f.updateTime,
+        dist: miles(lat,lng,p.location.latitude,p.location.longitude),
+        url: p.googleMapsUri
+      };
+    }).filter(Boolean).sort((a,b)=>a.price-b.price || a.dist-b.dist).slice(0,3);
+
+    if(!rows.length){
+      st.textContent = 'No regular-gas prices were listed for the '+((data.places||[]).length)+' closest stations. Try again later or from a different spot.';
+      return;
+    }
+    st.textContent = 'Checked the '+data.places.length+' closest stations.';
+    out.innerHTML = rows.map((r,i)=>`
+      <div class="card">
+        <span class="price">$${r.price.toFixed(2)}</span>
+        <div><span class="rank">${i+1}</span><span class="name">${esc(r.name)}</span></div>
+        <div class="meta">${esc(r.addr)}<br>${r.dist.toFixed(1)} mi away${r.updated? ' · updated '+ago(r.updated):''}</div>
+        <div class="meta">${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Open in Maps</a>`:''}</div>
+      </div>`).join('');
+  }catch(e){
+    st.className='meta err'; st.textContent = e.message;
+  }
+}
+
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ago(iso){
+  const h = (Date.now()-new Date(iso))/36e5;
+  if(h<1) return 'under an hour ago';
+  if(h<24) return Math.round(h)+' hr ago';
+  return Math.round(h/24)+' day(s) ago';
+}
+
+$('saveKey').onclick = ()=>{ const v=$('key').value.trim(); if(v){ setKey(v); show(); } };
+$('changeKey').onclick = ()=>{ setKey(''); $('key').value=''; show(); };
+$('go').onclick = run;
+show();
+</script>
+</body>
+</html>
